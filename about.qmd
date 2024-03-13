@@ -30,7 +30,11 @@ knitr::opts_chunk$set(echo = TRUE)
 
 My quantitative trading strategy is based on the fundamental signals used in the Supply and Demand Balance for crude oil. I chose this because crude is a physical commodity which will rely heavily on various fundamental factors such as the inventory levels of crude at Cushing, OK as well as other physical aspects which can be added to my current model. The strategy uses WTI Futures from NYMEX and Cushing Inventory data from EIA released on Wednesday's.
 
-Once inventory data is released the change in inventory is calculated. If the change is positive (inventory increase) or negative (inventory increase) a certain threshold of change must be met which was optimized from the training data. If a change is positive and the threshold is met a short position would be put on and vice versa for a negative change in inventory. Once a position is initiated a stop loss and take profit level is set which was also derived from the training data and a maximum of 2 business days is given before the trade must be closed. Signals would be evaluated each week and if the indicator initiates a trade it will be executed on the close of that day since EIA data comes out in the afternoon and a position would be executed at close.
+Once inventory data is released the change in inventory is calculated. If the change is positive (inventory increase) or negative (inventory decrease) a certain threshold of change must be met which was optimized from the training data. If a change is positive and the threshold is met, a short position would be put on and vice versa for a negative change in inventory. Once a position is initiated a stop loss and take profit level is set, which was derived from the training data and a maximum of 2 business days is given before the trade must be closed. Signals would be evaluated each week and if the indicator initiates a trade it will be executed on the close of that day since EIA data comes out in the afternoon and a position would be executed at close.
+
+## WTI Front Month Price vs Cushing Inventory 3 Month Rolling Correlation
+
+###### \*Note: Plots are interactive
 
 ```{r import data, echo=FALSE, fig.height=3.5, fig.width=9, message=FALSE, warning=FALSE}
 library(RTL)
@@ -87,7 +91,7 @@ cush.wide <- merge(cush.wide, c_plot, by = "date", all = TRUE) %>% na.omit() %>%
 cush.wide <- cush.wide[, c(1,3,2)]
 
 cush_plot <- cush.wide %>% plot_ly(x = ~date, y = ~Cushing_Inventory/1000, type = "scatter", mode = "lines", name = "Cushing Inventory (kbd)") %>% add_trace(y = ~CL01, yaxis = "y2", name = "WTI Price") %>% layout(title = "", xaxis = list(title = ""), yaxis = list(title = "Millions of Barrels"), yaxis2 = list(overlaying = "y", side = "right", tickformat = "$", automargin = TRUE), legend = list(orientation = "h", xanchor = "center", x = 0.5))
-cush_plot <- cush_plot %>% layout(annotations=list(x = 0.01 , y = 1.09, text = "WTI Price vs Cushing Inventory                     3 Month Rolling Correlation", showarrow = F, xref='paper', yref='paper', font = list(size = 20)))
+cush_plot <- cush_plot %>% layout(annotations=list(x = 0.01 , y = 1.09, text = "", showarrow = F, xref='paper', yref='paper', font = list(size = 20)))
 
 
 library(slider)
@@ -431,6 +435,8 @@ grid.arrange(z_c, z_g, ncol = 2)
 
 ### Performance
 
+###### \*Note: Custom function was used to obtain OHLC from continuous contract so results in visual may differ from wording due to refresh each time the page is run
+
 The strategy performance within the training period shows that a cumulative return of 1.55 is achieved using optimal parameters for signal generation and ultimately trade entry. The strategy relies on fewer but profitable trades. An interesting pattern that can be seen is the strategy was able to profit from the large drop in price in 2014. This would indicate a delayed reaction from Cushing inventory and the movement in WTI price. To increase profitability a supply indicator could be added to the model covering the other side of the supply/demand balance. The volatility of inventories after the 2014 drop caused some opportunity and increased trades which ended up being profitable. In general the strategy slowly profits from few but profitable trades. My strategy performs better than a buy and roll over at expiry strategy just based off the price charts. If one was to buy and roll over each month they would have a cumulative return much lower (less than 1) compared to my strategy finishing with a 1.55.
 
 ```{r echo=FALSE, fig.keep='last', message=FALSE, warning=FALSE}
@@ -468,6 +474,8 @@ xts::addSeries(
 ```
 
 ## Testing Period
+
+###### \*Note: Custom function was used to obtain OHLC from continuous contract so results in visual may differ from wording due to refresh each time the page is run
 
 Evaluating the testing period performance shows a significant gain with a cumulative return of 2.4. The profitability stems from correct trades being initiated during the bull run. Using the optimal parameters we are able to filter out noise and only trade on significant information providing the best opportunity to capture winning trades. We are able to see through the positions that mostly long signals were generated and all trades were closed quickly to only capture market reaction to inventory. We can tell from our performance that the training period provided strong optimal signal thresholds that work in bear and bull market conditions, but more importantly that the strategy of using inventory levels at Cushing to trade the front month WTI contract is better than buying and holding (with roll over).
 
@@ -508,7 +516,7 @@ xts::addSeries(
 
 There are many lessons I took from this project that will help with my coding and thought processes. These include:
 
--   Quantitative trading is extremely complex and thinking about signals and the fundamental relationship between a signal and your asset is important. Prior to coding, I wanted to use various spreads, refined products and crude data to evaluate various trading strategies but once I began to code, the complexity of each dimension was difficult and time consuming to implement so I had to reduce my complexity (would like to add more complexity on my own time).
+-   Quantitative trading is extremely complex and thinking about signals and the fundamental relationship between a signal and your asset is important. Prior to coding, I wanted to use various spreads, refined products and crude data to evaluate various trading strategies but once I began to code, the complexity of each dimension was difficult and time consuming to implement so I had to reduce my complexity (would like to add more complexity soon).
 
 -   Always analyze data and data frames before moving forward. By analyzing my data frames and double checking all calculations worked accordingly I was able to find a fatal error which would not have been found if it were not for a double check. The error I found and fixed was EIA data was extracted in a descending format for dates, so my inventory change calculation was forward looking and using future dates. This was a simple fix of changing EIA data to ascending.
 
