@@ -1,0 +1,521 @@
+---
+title: "Quantitative Trading of WTI Futures Using Cushing Inventory"
+author: "Daniel Vovk"
+date: "2023-04-07"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+```{=html}
+<style type="text/css">
+
+h4.date {
+  font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlue;
+}
+</style>
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Strategy
+
+## Trading Description and Rationale
+
+My quantitative trading strategy is based on the fundamental signals used in the Supply and Demand Balance for crude oil. I chose this because crude is a physical commodity which will rely heavily on various fundamental factors such as the inventory levels of crude at Cushing, OK as well as other physical aspects which can be added to my current model. The strategy uses WTI Futures from NYMEX and Cushing Inventory data from EIA released on Wednesday's.
+
+Once inventory data is released the change in inventory is calculated. If the change is positive (inventory increase) or negative (inventory increase) a certain threshold of change must be met which was optimized from the training data. If a change is positive and the threshold is met a short position would be put on and vice versa for a negative change in inventory. Once a position is initiated a stop loss and take profit level is set which was also derived from the training data and a maximum of 2 business days is given before the trade must be closed. Signals would be evaluated each week and if the indicator initiates a trade it will be executed on the close of that day since EIA data comes out in the afternoon and a position would be executed at close.
+
+```{r import data, echo=FALSE, fig.height=3.5, fig.width=9, message=FALSE, warning=FALSE}
+library(RTL)
+library(tidyverse)
+library(tidyquant)
+library(GGally)
+library(plotly)
+library(dplyr)
+library(gridExtra)
+library(cowplot)
+
+#library(tidyr)
+
+eia_key <- "LNZilwmovby8Y1AwmvfH2Ypoc8yeACR1o907LKqz"
+
+col_function <- function(data, mapping, method = "kendall", use ="pairwise"){
+        x <- eval_data_col(data, mapping$x)
+        y <- eval_data_col(data, mapping$y)
+        correlation <- cor(x,y, method = method, use = use)
+        col_palate <- colorRampPalette(c("blue", "white", "green"), interpolate = "spline")
+        fill_in <- col_palate(100)[findInterval(correlation, seq(-1,1, length=100))]
+        ggally_cor(data = data, mapping = mapping)+theme_void()+theme(panel.background = element_rect(fill = fill_in))}
+
+#getting CL01 and CL02 data and calculating spread and adjusting for roll 
+contracts <- RTL::getPrices(feed = "CME_NymexFutures_EOD_continuous", contracts = paste0("CL_", sprintf('%0.3d', 1:2), "_Month"), from = "2012-01-03", iuser = LOGIN_MS, ipassword = PASS_MS) %>% dplyr::filter(!date %in% c(as.Date("2020-04-20"))) %>% drop_na()# %>% mutate(front_spread = CL_001_Month - CL_002_Month) %>% select(-CL_001_Month, -CL_002_Month)
+cutoff <- "2020-01-01"
+test <- contracts %>% filter(date >= as.Date(cutoff))
+contracts <- contracts %>% filter(date <= as.Date(cutoff))
+
+
+#train <- contracts %>% filter(date <= as.Date(cutoff))
+#test <- contracts %>% filter(date <= as.Date(cutoff))
+c_plot <- contracts %>% select(-CL_002_Month)
+c12 <- contracts %>% select(-date, -CL_002_Month)
+t12 <- test %>% select(-date, -CL_002_Month)
+c1 <- c12 %>% mutate(ch = abs(CL_001_Month - lag(CL_001_Month))) %>% na.omit()
+rough <- mean(c1$ch)
+#dates <- contracts %>% select(date)
+
+
+#importing EIA cushing inventory data
+first_crude <- tibble::tribble( ~ticker, ~name, #thousands of barrels all only crude
+                                "PET.W_EPC0_SAX_YCUOK_MBBL.W", "Cushing_inv")
+
+cushing_inv_1<- first_crude %>% RTL::eia2tidy_all(tickers = ., key = eia_key) %>% filter(date <= as.Date(cutoff) & date >= as.Date("2012-01-03")) %>% na.omit()
+cushing_inv_1 <- cushing_inv_1[order(cushing_inv_1$date), ]
+cushing_inv_2<- first_crude %>% RTL::eia2tidy_all(tickers = ., key = eia_key) %>% filter(date >= as.Date(cutoff) & date <= as.Date("2023-04-12")) %>% na.omit()
+cushing_inv_2 <- cushing_inv_2[order(cushing_inv_2$date), ]
+
+#yoyo <- cushing_inv_2 %>% arrange(desc(date))
+
+cush.wide <- cushing_inv_1 %>%  pivot_wider(names_from = series, values_from = value) %>% na.omit()
+cush.wide <- merge(cush.wide, c_plot, by = "date", all = TRUE) %>% na.omit() %>% rename("Cushing_Inventory" = "Cushing_inv", "CL01" = "CL_001_Month")
+cush.wide <- cush.wide[, c(1,3,2)]
+
+cush_plot <- cush.wide %>% plot_ly(x = ~date, y = ~Cushing_Inventory/1000, type = "scatter", mode = "lines", name = "Cushing Inventory (kbd)") %>% add_trace(y = ~CL01, yaxis = "y2", name = "WTI Price") %>% layout(title = "", xaxis = list(title = ""), yaxis = list(title = "Millions of Barrels"), yaxis2 = list(overlaying = "y", side = "right", tickformat = "$", automargin = TRUE), legend = list(orientation = "h", xanchor = "center", x = 0.5))
+cush_plot <- cush_plot %>% layout(annotations=list(x = 0.01 , y = 1.09, text = "WTI Price vs Cushing Inventory                     3 Month Rolling Correlation", showarrow = F, xref='paper', yref='paper', font = list(size = 20)))
+
+
+library(slider)
+rollCor <- cush.wide %>% dplyr::mutate(cor4 = slider::pslide_dbl(.l = list(CL01, Cushing_Inventory), .f = ~ cor(.x,.y), .before = 12, .after = 0, .complete = TRUE)) %>% tidyr::drop_na()
+r_c <- rollCor %>% ggplot(aes(x = date, y = cor4)) + geom_line(col = "blue") + geom_line(aes(x = date, y = stats::cor(CL01, Cushing_Inventory, method = "pearson")), col = "black") + labs(title = "", subtitle = "CL01 Vs Cushing Inventory", x = "", y = "") 
+r_c <- ggplotly(r_c)
+r_c <- r_c %>% layout(annotations=list(x = 0.5 , y = 1.05, text = "", showarrow = F, xref='paper', yref='paper', font = list(size = 20)))
+
+subplot(cush_plot, r_c, nrows = 1, margin = 0.07, shareX = FALSE, shareY = FALSE)
+
+#grid <- grid.arrange(
+#  ggplotGrob(gri$cush_plot), # Convert plotly object to grob
+#  ggplotGrob(gri$r_c), # Convert plotly object to grob
+#  ncol = 2
+#)
+#plot_grid(cush_plot, r_c, ncol = 2)
+#grid.arrange(cush_plot, r_c, ncol = 2)
+
+```
+
+## Research
+
+To ensure Cushing Inventory is a valid indicator, I ran a correlation and regression which showed a strong negative correlation between the inventory levels and the front month WTI futures contract (CL01).
+
+### Strengths and Weaknesses
+
+The trading strategy would have strong results when static correlation (-0.6) which is used in the trading signals, is similar to the rolling correlation as the rolling correlation provides the most accurate and up to date measure, thus, ensures accurate signals. On the other hand a weakness would be if the rolling correlation is positive which is the opposite of the static correlation and incorrect signals could be initiated leading to losing trades. An improvement to the model would be to implement rolling correlation in the signal generation instead of static correlation which does not provide the most accurate/recent measure of correlation.
+
+Positive results would also be seen when large changes in inventory lead to large changes in futures price but most importantly if the market reaction happens within 2 business days. This is because the trading strategy is set to close out the position within 2 business days and is triggered by the take profit or stop loss. On the other hand the weakness would be low volatility in inventory change because fewer trades would be triggered due to the higher threshold of change required to initialize a trade.
+
+```{r echo=FALSE, fig.height=3.5, fig.align='center', fig.width=3.5, message=FALSE, warning=FALSE}
+cush.wide_d <- cush.wide %>% select(-date)
+corr_matrix <- cush.wide_d %>% GGally::ggpairs(axisLabels = "none", upper = list(continuous = col_function, lower = list(continuous = wrap("points", size = 0.8))))
+corr_matrix
+```
+
+```{r next, message=FALSE, warning=FALSE, include=FALSE}
+cush_change <- cushing_inv_1 %>% select(-series) %>% mutate(change = round((value -dplyr::lag(value)), 2)) %>% na.omit()
+cush_change2 <- cushing_inv_2 %>% select(-series) %>% mutate(change = round((value -dplyr::lag(value)), 2)) %>% na.omit()
+neg_analysis <- cush_change %>% filter(change < 0)
+pos_analysis <- cush_change %>% filter(change > 0)  
+#summary(neg_analysis$change) 
+m_1 <- mean(pos_analysis$change)
+m_2 <- mean(neg_analysis$change)
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#-6417.0 -1526.8  -855.5 -1251.8  -455.0    -4.0 
+#summary(pos_analysis$change) 
+#Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#26.0   557.5  1009.0  1312.2  1866.5  5587.0 
+  
+
+#merging and cleaning data to evaluate association just visually
+#test <- merge(CL_ret, cush_change, by = "date", all = TRUE) %>% na.omit()
+
+#fit <- stats::lm(CL_001_Month ~ value, data = compare)
+#summary(fit)
+```
+
+# Model Implementation
+
+## Data Used
+
+To implement the trading model I pulled the front month (CL01) NYMEX Futures close prices using Morning Star and used a function which would convert the Close prices into into an adjusted Open, High, Low, Close price format (different values each run). From there Cushing Inventory (thousands of barrels) data was pulled from EIA in a weekly format and change in inventory was calculated. The training period begins at 2012-01-01 and ends at 2020-01-01, while the test period begins at 2020-01-01 until present day.
+
+## Indicators
+
+The indicator currently used in the model is change in Cushing Inventory but a further expansion could be utilizing change in crude movements across various PADD areas as an indicator. Analyzing refined products inventories and movements such as RBOB could also add another layer of complexity by analyzing calendar and crack spreads.
+
+## Signals
+
+My signals to enter a trade are made up of two components. Firstly, the direction of the change in Cushing Inventory provides the direction of my trade. If the change is negative, economically this means a lower supply of crude in Cushing which would lead to a higher price assuming demand is unchanged, meaning a long signal would be optimal and vice versa. The second component is a threshold that must be met before confirming the signal. The threshold is different based on the direction of the trade. Each threshold was derived by finding the mean of inventory change for each direction (mean of all positive changes and mean of all negative changes). These thresholds were later optimized ensuring that all trades are not sensitive to noise and only generates a signal on significant changes.
+
+| Inventory Change | Signal Direction | Threshold Check     | Signal Executes |
+|------------------|------------------|---------------------|-----------------|
+| Positive         | Short            | \< Threshold (-996) | -1              |
+| Negative         | Long             | \> Threshold (1020) | +1              |
+
+## Trades
+
+Once a signal is executed a trade will execute at the close of the same day since EIA data is released on Wednesday afternoon. After the trade has been executed a stop loss and take profit are activated. These limits are set by creating an upper and lower bound on the entry price. First, I found the mean of WTI Futures price changes in the training period and used that to create the bounds by adding and subtracting the threshold from my entry price. This ensures noise does not affect my trade exit and only significant price changes lead to capital preservation or a profitable exit. The stop loss and take profit level is evaluated on each open and close price after entry. My final limit used for capital preservation is my trade must be closed within 2 business days as my strategy assumes the market should have reacted to the information within that time frame.
+
+```{r OHLC part, echo=FALSE, message=FALSE, warning=FALSE}
+options("getSymbols.warning4.0" = FALSE)
+library(timetk)
+library(TTR)
+library(PerformanceAnalytics)
+
+
+fut_ohlc <- function(data, ohlc = RTL::ohlc) {
+  tmp <- data %>%
+    dplyr::mutate(ticker = "tmp") %>% 
+    tidyr::pivot_longer(-ticker, names_to = "contract", values_to = "Close") %>% 
+    dplyr::mutate(ticker = gsub("[[:digit:]]","",contract), 
+                  contract = as.character(readr::parse_number(contract)),
+                  Open = Close,
+                  High = Close,
+                  Low = Close)
+  x = ohlc[sample(nrow(ohlc),nrow(tmp)),]
+  tmp$Open <- abs(tmp$Open * x$Open)
+  tmp$High <- abs(tmp$High * x$High)
+  tmp$Low <- tmp$Low * x$Low
+  tmp 
+}
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#c1 <- c1 %>% select(-ch)
+cleaned <- fut_ohlc(c12)
+tclean <- fut_ohlc(t12)
+w_date <- cleaned %>% mutate(date = contracts$date, .before = ticker) %>% dplyr::mutate(across(where(is.numeric), round, 2))
+t_date <- tclean %>% mutate(date = test$date, .before = ticker) %>% dplyr::mutate(across(where(is.numeric), round, 2))
+
+
+w_param <- merge(w_date, cush_change, by = "date", all = TRUE)
+t_param <- merge(t_date, cush_change2, by = "date", all = TRUE)
+w_param[is.na(w_param)] <- 0
+t_param[is.na(t_param)] <- 0
+w_p_2 <- w_param[w_param$contract != 0,]
+t_p_2 <- t_param[t_param$contract != 0,]
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+        #
+###THIS CODE IS NOT RAN###
+        #
+
+w_p_2 <- w_p_2 %>% mutate(signal = case_when(change > m_1 ~ -1, change < m_2 ~ 1, TRUE ~ 0))
+#w_trade <- w_p_2 %>% mutate(trade = tidyr::replace_na(dplyr::lag(signal) - dplyr::lag(signal, n = 2L), 0))
+w_p_2$T_entry <- with(w_p_2, ifelse(signal > 0 & change < m_2, 1, ifelse(signal > 0 & change >= m_2, 15, 0)))
+w_p_2$T_entry_2 <- with(w_p_2, ifelse(signal < 0 & change > m_1, -1, ifelse(signal < 0 & change <= m_1, -15, 0)))
+w_p_2 <- w_p_2 %>% mutate(Entry = T_entry + T_entry_2)
+pos <- which(w_p_2$Entry != 0)
+
+#wasn't sure how to vectorize and find faster function so had to use for loop :( not ideal aka fastest/effecient
+for(i in 1:length(pos)) {
+  if (w_p_2$signal[pos[i]] != 0 ) {
+      if (w_p_2$Open[pos[i]+1] >= w_p_2$Close[pos[i]]+rough | w_p_2$Open[pos[i]+1] <= w_p_2$Close[pos[i]]-rough) {w_p_2$Entry[pos[i]+1] =  -(w_p_2$Entry[pos[i]])}
+      else if (w_p_2$Close[pos[i]+1] >= w_p_2$Close[pos[i]]+rough | w_p_2$Close[pos[i]+1] <= w_p_2$Close[pos[i]]-rough) {(w_p_2$T_entry[pos[i]+1] = 1) & (w_p_2$Entry[pos[i]+1] =  -(w_p_2$Entry[pos[i]]))}
+      else if (w_p_2$Open[pos[i]+2] >= w_p_2$Close[pos[i]]+rough | w_p_2$Open[pos[i]+2] <= w_p_2$Close[pos[i]]-rough) {w_p_2$Entry[pos[i]+2] = -(w_p_2$Entry[pos[i]])}
+      else if (w_p_2$Close[pos[i]+2] >= w_p_2$Close[pos[i]]+rough | w_p_2$Close[pos[i]+2] <= w_p_2$Close[pos[i]]-rough) {(w_p_2$Entry[pos[i]+2] = -(w_p_2$Entry[pos[i]])) & (w_p_2$T_entry[pos[i]+2] = 1)}
+      else if (w_p_2$Open[pos[i]+3] >= w_p_2$Close[pos[i]]+rough | w_p_2$Open[pos[i]+3] <= w_p_2$Close[pos[i]]-rough) {w_p_2$Entry[pos[i]+3] = -(w_p_2$Entry[pos[i]])}
+      else if (w_p_2$Close[pos[i]+3] >= w_p_2$Close[pos[i]]+rough | w_p_2$Close[pos[i]+3] <= w_p_2$Close[pos[i]]-rough) {(w_p_2$Entry[pos[i]+3] = -(w_p_2$Entry[pos[i]])) & (w_p_2$T_entry[pos[i]+3] = 1)}
+      else {w_p_2$Entry[pos[i]+3] = -(w_p_2$Entry[pos[i]])}
+  }}
+positions_inc <- w_p_2 %>% mutate(posi = cumsum(Entry), ret_new = 0)
+#positions_inc$posi[pos[1]] * (positions_inc$Open[pos[1]+1]/positions_inc$Close[pos[1]] - 1)
+
+for(x in 1:length(pos)) {
+  if (positions_inc$Entry[pos[x]+1] != 0 & positions_inc$T_entry[pos[x]+1] == 0 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Open[pos[x]+1]/positions_inc$Close[pos[x]] - 1)}
+  else if (positions_inc$Entry[pos[x]+1] != 0 & positions_inc$T_entry[pos[x]+1] == 1 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Close[pos[x]+1]/positions_inc$Close[pos[x]] - 1)}
+  else if (positions_inc$Entry[pos[x]+2] != 0 & positions_inc$T_entry[pos[x]+2] == 0 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Open[pos[x]+2]/positions_inc$Close[pos[x]] - 1)}
+  else if (positions_inc$Entry[pos[x]+2] != 0 & positions_inc$T_entry[pos[x]+2] == 1 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Close[pos[x]+2]/positions_inc$Close[pos[x]] - 1)}
+  else if (positions_inc$Entry[pos[x]+3] != 0 & positions_inc$T_entry[pos[x]+3] == 0 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Open[pos[x]+3]/positions_inc$Close[pos[x]] - 1)}
+  else if (positions_inc$Entry[pos[x]+3] != 0 & positions_inc$T_entry[pos[x]+3] == 1 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Close[pos[x]+3]/positions_inc$Close[pos[x]] - 1)}}
+
+positions_inc <- positions_inc %>% mutate(cumeq = cumprod(1 + ret_new))
+```
+
+## Training Period
+
+### Optimization
+
+Using the training period I optimized two parameters which would affect the signal generation. The first parameter was the size of inventory change required to initiate a long position. Before the optimization I used the mean of positive inventory changes but through optimization I was able to achieve the optimal positive change threshold which was 1300 (thousands of barrels). This ensured that a significant change was present before initiating a trade and capturing the market reaction. The same process was repeated for the optimal threshold of negative inventory change which was -1000 (thousands of barrels). The optimal level was defined as having the highest cumulative return (1.5) as well as the highest percentage of winning/profitable trades (60%).
+
+```{r function, echo=FALSE, message=FALSE, warning=FALSE}
+#optimizwe with a function
+fund_strat <- function(data, m_1 = mean(pos_analysis$change), m_2 = mean(neg_analysis$change)) {
+  w_p_2 <- data %>% mutate(signal = case_when(change > m_1 ~ -1, change < m_2 ~ 1, TRUE ~ 0))
+
+  w_p_2$T_entry <- with(w_p_2, ifelse(signal > 0 & change < m_2, 1, ifelse(signal > 0 & change >= m_2, 15, 0)))
+  w_p_2$T_entry_2 <- with(w_p_2, ifelse(signal < 0 & change > m_1, -1, ifelse(signal < 0 & change <= m_1, -15, 0)))
+  w_p_2 <- w_p_2 %>% mutate(Entry = T_entry + T_entry_2)
+  pos <- which(w_p_2$Entry != 0)
+  
+  #wasn't sure how to vectorize and find faster function so had to use for loop :( not ideal aka fastest/effecient
+  for(i in 1:length(pos)) {
+    if (w_p_2$signal[pos[i]] != 0 ) {
+        if (w_p_2$Open[pos[i]+1] >= w_p_2$Close[pos[i]]+rough | w_p_2$Open[pos[i]+1] <= w_p_2$Close[pos[i]]-rough) {w_p_2$Entry[pos[i]+1] =  -(w_p_2$Entry[pos[i]])}
+        else if (w_p_2$Close[pos[i]+1] >= w_p_2$Close[pos[i]]+rough | w_p_2$Close[pos[i]+1] <= w_p_2$Close[pos[i]]-rough) {(w_p_2$T_entry[pos[i]+1] = 1) & (w_p_2$Entry[pos[i]+1] =  -(w_p_2$Entry[pos[i]]))}
+        else if (w_p_2$Open[pos[i]+2] >= w_p_2$Close[pos[i]]+rough | w_p_2$Open[pos[i]+2] <= w_p_2$Close[pos[i]]-rough) {w_p_2$Entry[pos[i]+2] = -(w_p_2$Entry[pos[i]])}
+        else if (w_p_2$Close[pos[i]+2] >= w_p_2$Close[pos[i]]+rough | w_p_2$Close[pos[i]+2] <= w_p_2$Close[pos[i]]-rough) {(w_p_2$Entry[pos[i]+2] = -(w_p_2$Entry[pos[i]])) & (w_p_2$T_entry[pos[i]+2] = 1)}
+     #   else if (w_p_2$Open[pos[i]+3] >= w_p_2$Close[pos[i]]+rough | w_p_2$Open[pos[i]+3] <= w_p_2$Close[pos[i]]-rough) {w_p_2$Entry[pos[i]+3] = -(w_p_2$Entry[pos[i]])}
+      #  else if (w_p_2$Close[pos[i]+3] >= w_p_2$Close[pos[i]]+rough | w_p_2$Close[pos[i]+3] <= w_p_2$Close[pos[i]]-rough) {(w_p_2$Entry[pos[i]+3] = -(w_p_2$Entry[pos[i]])) & (w_p_2$T_entry[pos[i]+3] = 1)}
+        else {w_p_2$Entry[pos[i]+2] = -(w_p_2$Entry[pos[i]])}
+    }}
+  positions_inc <- w_p_2 %>% mutate(posi = cumsum(Entry), ret_new = 0)
+  #positions_inc$posi[pos[1]] * (positions_inc$Open[pos[1]+1]/positions_inc$Close[pos[1]] - 1)
+  
+  for(x in 1:length(pos)) {
+    if (positions_inc$Entry[pos[x]+1] != 0 & positions_inc$T_entry[pos[x]+1] == 0 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Open[pos[x]+1]/positions_inc$Close[pos[x]] - 1)}
+    else if (positions_inc$Entry[pos[x]+1] != 0 & positions_inc$T_entry[pos[x]+1] == 1 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Close[pos[x]+1]/positions_inc$Close[pos[x]] - 1)}
+    else if (positions_inc$Entry[pos[x]+2] != 0 & positions_inc$T_entry[pos[x]+2] == 0 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Open[pos[x]+2]/positions_inc$Close[pos[x]] - 1)}
+    else if (positions_inc$Entry[pos[x]+2] != 0 & positions_inc$T_entry[pos[x]+2] == 1 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Close[pos[x]+2]/positions_inc$Close[pos[x]] - 1)}
+   # else if (positions_inc$Entry[pos[x]+3] != 0 & positions_inc$T_entry[pos[x]+3] == 0 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Open[pos[x]+3]/positions_inc$Close[pos[x]] - 1)}
+  #  else if (positions_inc$Entry[pos[x]+3] != 0 & positions_inc$T_entry[pos[x]+3] == 1 & positions_inc$signal[pos[x]] != 0) {positions_inc$ret_new[pos[x]] = positions_inc$posi[pos[x]] * (positions_inc$Close[pos[x]+3]/positions_inc$Close[pos[x]] - 1)}}
+  }
+  positions_inc <- positions_inc %>% mutate(cumeq = cumprod(1 + ret_new))
+  return(positions_inc)
+}
+
+
+works <- fund_strat(data = w_p_2, m_1 = mean(pos_analysis$change), m_2 = mean(neg_analysis$change))
+
+#r_a <- rolladjust(works %>% select(date,ret_new), commodityname = c("cmewti"), rolltype = c("Last.Trade"))
+#r_aa <- merge(works, r_a, by = "date", all = TRUE)
+
+#z <- works %>% dplyr::select(date,ret_new)
+#tradeStats(x = z, Rf = 0)
+
+
+#last <- function(data)  {return( data[nrow(data),2] ) }
+#last(fund_strat(data = w_p_2, m_1 = mean(pos_analysis$change), m_2 = mean(neg_analysis$change)))
+
+#s <- last(fund_strat(data = w_p_2, m_1 = mean(pos_analysis$change), m_2 = mean(neg_analysis$change)) %>% select(date, cumeq))
+
+#s <- tradeStats(fund_strat(data = w_p_2, rough = mean(c1$ch) , m_1 = mean(pos_analysis$change), m_2 = mean(neg_analysis$change)) %>% select(date,cumeq)) %>% drop_na()
+
+#last(fund_strat(data = w_p_2, opt[i, "rough"], opt[i, "m_1"], opt[i, "m_2"]) %>% select(date, cumeq)))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+opt <- expand.grid(m_1 = seq(from = 500, to = 2000, by = 100), m_2 = seq(from = -500, to = -2000, by = -100))
+library(foreach)
+library(doParallel)
+n_cores <- detectCores() - 2
+
+cluster <- makeCluster(n_cores)
+registerDoParallel(cluster)
+# Loop using multiple clusters
+res <- foreach(
+  i = 1:nrow(opt),
+  .combine = "cbind",
+  .packages = c(
+    "tidyverse",
+    "RTL",
+    "timetk",
+    "tidyquant",
+    "PerformanceAnalytics"
+  )
+) %dopar% {
+  as.numeric(tradeStats(fund_strat(data = w_p_2, opt[i, "m_1"], opt[i, "m_2"]) %>% select(date, ret_new)))
+}
+stopCluster(cluster)
+
+tib_res <- tibble::as_tibble(t(res))
+#colnames(res) <- names(last(x = works %>% dplyr::select(date,ret)))
+ttt <- cbind(opt, tib_res)
+z <- works %>% dplyr::select(date,ret_new)
+colnames(tib_res) <- names(RTL::tradeStats(x = z))
+gg <- cbind(opt, tib_res)
+
+#z <- works %>% dplyr::select(date,cumeq)
+#q <- tradeStats(z, Rf = 0)
+
+
+#colnames(res) <- names(RTL::tradeStats(x = works %>% dplyr::select(date,ret)))
+
+#pw <- as.data.frame(opt[,1]) %>% mutate(opt[,2], opt[,3], tib_res[,1])
+#colnames(pw) <- c("rough", "m_1", "m_2", "profit")
+#tib_res <- cbind(tib_res, opt)
+#tib_res <- tib_res %>% rename(make.unique(names(.)[1]))
+#all_res <- mutate(rough = opt[,1])#, m_1 = opt[,2], m_2 = opt[,3]), cumeq = tib_res[,1])
+
+```
+
+```{r visualize optimization, echo=FALSE, fig.height=4, fig.show="hold", fig.width=8, message=FALSE, warning=FALSE}
+#library(lattice)
+#wireframe(gg$CumReturn ~ gg$m_1 * gg$m_2,
+#  scales = list(arrows = FALSE, xlab = "", ylab = ""),
+#  shade = TRUE,
+#  drape = TRUE,
+#  colorkey = list(space = "right"),
+#  main = "Cumulative Return"
+#)
+
+
+library(plotly)
+library(manipulateWidget)
+Cushing_Increase = unique(gg$m_1)
+Cushing_Decrease = unique(gg$m_2)
+CumReturn <-
+  gg %>% dplyr::select(m_1, m_2, CumReturn) %>%
+  tidyr::pivot_wider(values_from = CumReturn, names_from = m_2) %>%
+  dplyr::select(-1) %>% as.matrix()
+
+cp <- plot_ly(x = ~ Cushing_Increase,
+        y = ~ Cushing_Decrease,
+        z = ~ CumReturn) %>% add_surface()
+
+Win_Rate <-
+  gg %>% dplyr::select(m_1, m_2, '%.Win') %>%
+  tidyr::pivot_wider(values_from = '%.Win', names_from = m_2) %>%
+  dplyr::select(-1) %>% as.matrix()
+
+wp <- plot_ly(x = ~ Cushing_Increase,
+        y = ~ Cushing_Decrease,
+        z = ~ Win_Rate) %>% add_surface()
+
+manipulateWidget::combineWidgets(cp, wp, nrow = 1)
+```
+
+### Risk Appetite
+
+When analyzing the max draw downs we can see that using a low threshold on signal generation for either positive or negative inventory change exposes the strategy to high trade sensitivity. If the signal generation is too sensitive and ultimately too many trades will be executed which would lead to large losses because the noise will trigger trades that should not be executed in the first place. Capital preservation is in the form of a stop loss where a draw down of \$0.91 closes the position. Take profit uses the same measure where an increase of \$0.91 from the entry price closes the position as well. Due to the strategy a high win percentage is important for higher returns but this parameter should also be optimized to maximize returns. Currently \$0.91 is derived from the mean of changes in WTI futures price.
+
+Evaluating the Z-Scores shows the distribution for various performance measures for the trading strategy. We can use these results to view how the optimal parameters compare against the mean. The higher or lower the Z-score the further away (standard deviations) the point is from the mean. The optimal parameters can be seen as having higher z-scores meaning the optimal results stray away from the mean. Using this information we can identify a pattern for areas of optimal parameters based on cumulative return, in this case, a higher inventory increase threshold for long positions (parameter 1) and lower inventory change threshold for short positions (parameter 2).
+
+```{r risk appetite, echo=FALSE, fig.height=4, fig.show="hold", fig.width=11.5, message=FALSE, warning=FALSE}
+
+DrawDown <-
+  gg %>% dplyr::select(m_1, m_2, 'DD.Max') %>%
+  tidyr::pivot_wider(values_from = 'DD.Max', names_from = m_2) %>%
+  dplyr::select(-1) %>% as.matrix()
+
+dd <- plot_ly(x = ~ Cushing_Increase,
+        y = ~ Cushing_Decrease,
+        z = ~ DrawDown) %>% add_surface()
+
+
+all_z <- gg %>% pivot_longer(cols = -c(m_1, m_2), names_to = "variable", values_to = "value") %>% dplyr::group_by(variable) %>% mutate(z_value = (value - mean(value)) / sd(value))
+
+
+z_c <- all_z %>% ggplot(aes(x = z_value)) +
+  geom_histogram(color = "black", fill = "blue", aes(y = ..density..)) +
+  facet_wrap( ~ variable, scales = "free_y")
+
+z_g <- all_z %>% ggplot(aes(x = m_1, y = m_2)) + geom_raster(aes(fill = z_value), interpolate = TRUE) + facet_wrap( ~ variable, scales = "free") + scale_fill_gradient2(low = "red",mid = "white",high = "blue",midpoint = 0) + theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.background = element_rect(fill = "white")
+  ) +
+  labs(title = "Z-score for Optimization Results", x = "Inventory Increase", y = "Inventory Decrease")
+
+grid.arrange(z_c, z_g, ncol = 2)
+
+```
+
+### Performance
+
+The strategy performance within the training period shows that a cumulative return of 1.55 is achieved using optimal parameters for signal generation and ultimately trade entry. The strategy relies on fewer but profitable trades. An interesting pattern that can be seen is the strategy was able to profit from the large drop in price in 2014. This would indicate a delayed reaction from Cushing inventory and the movement in WTI price. To increase profitability a supply indicator could be added to the model covering the other side of the supply/demand balance. The volatility of inventories after the 2014 drop caused some opportunity and increased trades which ended up being profitable. In general the strategy slowly profits from few but profitable trades. My strategy performs better than a buy and roll over at expiry strategy just based off the price charts. If one was to buy and roll over each month they would have a cumulative return much lower (less than 1) compared to my strategy finishing with a 1.55.
+
+```{r echo=FALSE, fig.keep='last', message=FALSE, warning=FALSE}
+
+final <- fund_strat(data = w_p_2, m_1 = 1300, m_2 = -1000) %>% timetk::tk_xts(date_var = date)
+plot(final$Close, main = "Strategy Results")
+
+xts::addSeries(final$Entry, main = "Trades",
+  on = NA,
+  type = "h",
+  col = "blue",
+  lty = 1,
+  lwd = 1,
+  pch = 0)
+
+xts::addSeries(
+  final$posi,
+  main = "Positions",
+  on = NA,
+  type = "h",
+  col = "blue",
+  lty = 1,
+  lwd = 1,
+  pch = 0)
+
+xts::addSeries(
+  final$cumeq,
+  main = "CumEQ",
+  on = NA,
+  type = "l",
+  col = "blue",
+  lty = 1,
+  lwd = 1,
+  pch = 0)
+```
+
+## Testing Period
+
+Evaluating the testing period performance shows a significant gain with a cumulative return of 2.4. The profitability stems from correct trades being initiated during the bull run. Using the optimal parameters we are able to filter out noise and only trade on significant information providing the best opportunity to capture winning trades. We are able to see through the positions that mostly long signals were generated and all trades were closed quickly to only capture market reaction to inventory. We can tell from our performance that the training period provided strong optimal signal thresholds that work in bear and bull market conditions, but more importantly that the strategy of using inventory levels at Cushing to trade the front month WTI contract is better than buying and holding (with roll over).
+
+```{r echo=FALSE, fig.keep='last', message=FALSE, warning=FALSE}
+final2 <- fund_strat(data = t_p_2, m_1 = 1300, m_2 = -1000) %>% timetk::tk_xts(date_var = date)
+plot(final2$Close, main = "Strategy Results")
+
+xts::addSeries(final2$Entry, main = "Trades",
+  on = NA,
+  type = "h",
+  col = "blue",
+  lty = 1,
+  lwd = 1,
+  pch = 0)
+
+xts::addSeries(
+  final2$posi,
+  main = "Positions",
+  on = NA,
+  type = "h",
+  col = "blue",
+  lty = 1,
+  lwd = 1,
+  pch = 0)
+
+xts::addSeries(
+  final2$cumeq,
+  main = "CumEQ",
+  on = NA,
+  type = "l",
+  col = "blue",
+  lty = 1,
+  lwd = 1,
+  pch = 0)
+```
+
+## Learnings
+
+There are many lessons I took from this project that will help with my coding and thought processes. These include:
+
+-   Quantitative trading is extremely complex and thinking about signals and the fundamental relationship between a signal and your asset is important. Prior to coding, I wanted to use various spreads, refined products and crude data to evaluate various trading strategies but once I began to code, the complexity of each dimension was difficult and time consuming to implement so I had to reduce my complexity (would like to add more complexity on my own time).
+
+-   Always analyze data and data frames before moving forward. By analyzing my data frames and double checking all calculations worked accordingly I was able to find a fatal error which would not have been found if it were not for a double check. The error I found and fixed was EIA data was extracted in a descending format for dates, so my inventory change calculation was forward looking and using future dates. This was a simple fix of changing EIA data to ascending.
+
+-   The most important lesson I learned is to always build code which can be scaled. I believe this is a fundamental skill to learn when writing code and helps implement massive changes with minimal changes. For example, the error described above was able to be fixed with one line of code because the rest of my functions and code were built in a way where different dates are acceptable. This also worked well when implementing the test set since the code is reusable from the training set analysis.
+
+## Reference
+
+Data sourced from Morningstar
+
+![](images/clipboard-3071892459.png)
