@@ -8,7 +8,7 @@ about:
   image-width: 15em
 ---
 
-Welcome to my portfolio, a showcase of my coding projects in the energy and crude commodity trading sector. By integrating data analytics and leveraging various models, I've crafted solutions that optimize trading decisions in the volatile energy sector. My approach combines analysis with practical application aiming to find market trends and insights in the.This portfolio not only showcases my technical skills but also my commitment to contributing innovative solutions to the ever-evolving field of commodity trading.
+Welcome to my portfolio, a showcase of my coding projects in the energy and crude commodity trading sector. By integrating data analytics and leveraging various models, I've crafted solutions that optimize trading decisions in the volatile energy sector. My approach combines analysis with practical application aiming to find market trends and insights. This portfolio not only showcases my technical skills but also my commitment to contributing innovative solutions to the ever-evolving field of commodity trading.
 
 The University of Alberta School of Business offers a strong Finance program that blends rigorous academics with practical application. We focus on student-directed learning, reflecting real workplace dynamics. We equip our students with enterprise-level financial tools and insights, guided by professors who bring a wealth of experience. The advanced courses in our program focus on the ability to frame real-life problems, use Finance concepts and theory, and solve them using Enterprise-level data science tools.
 
