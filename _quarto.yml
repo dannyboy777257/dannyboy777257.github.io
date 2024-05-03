@@ -10,6 +10,8 @@ website:
         text: Home
       - href: about.qmd
         text: Cushing Trading Strategy
+      - href: https://dannyboy777257.shinyapps.io/refineryanalysis/
+        text: USGC Refinery Analysis
 
 format:
   html:
